@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PDF to Text</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:820px;margin:40px auto;padding:0 16px;color:#222}
+h1{font-size:1.6em}#drop{border:2px dashed #888;border-radius:10px;padding:40px;text-align:center;cursor:pointer;background:#fafafa}
+#drop.over{background:#e8f0fe;border-color:#1a73e8}.file{border:1px solid #ddd;border-radius:8px;padding:12px;margin:14px 0}
+.file h3{margin:0 0 8px;font-size:1em}textarea{width:100%;height:200px;font-family:monospace;font-size:12px}
+button{background:#1a73e8;color:#fff;border:0;border-radius:6px;padding:8px 14px;margin:6px 6px 0 0;cursor:pointer}.muted{color:#666;font-size:.9em}
+</style></head><body>
+<h1>PDF to Text</h1>
+<p class="muted">Drop one or more PDFs below. Everything runs in your browser, so files never get uploaded anywhere.</p>
+<div id="drop">Drag PDFs here or click to choose<input id="pick" type="file" accept="application/pdf" multiple hidden></div>
+<div id="out"></div>
+<script type="module">
+import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs";
+const drop=document.getElementById('drop'),pick=document.getElementById('pick'),out=document.getElementById('out');
+drop.onclick=()=>pick.click();pick.onchange=e=>handle(e.target.files);
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('over')};drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');handle(e.dataTransfer.files)};
+async function handle(files){for(const f of files){if(f.type!=='application/pdf'&&!f.name.toLowerCase().endsWith('.pdf'))continue;await convert(f)}}
+async function convert(file){
+ const box=document.createElement('div');box.className='file';box.innerHTML=`<h3>${file.name}</h3><div class="muted">Converting…</div>`;out.prepend(box);
+ try{const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;let text='';
+  for(let p=1;p<=pdf.numPages;p++){const c=await (await pdf.getPage(p)).getTextContent();let line='',lastY=null;
+   for(const it of c.items){const y=it.transform[5];if(lastY!==null&&Math.abs(y-lastY)>2){text+=line.trimEnd()+'\n';line=''}line+=it.str+(it.hasEOL?'\n':'');lastY=y}
+   text+=line.trimEnd()+`\n\n--- Page ${p} ---\n\n`}
+  const empty=!text.replace(/--- Page \d+ ---/g,'').trim();
+  box.innerHTML=`<h3>${file.name} (${pdf.numPages} pages)</h3>${empty?'<p class="muted">No text found. This PDF is probably a scan or photo, which needs OCR.</p>':''}<textarea></textarea><br><button class="dl">Download .txt</button><button class="cp">Copy</button>`;
+  box.querySelector('textarea').value=text;
+  box.querySelector('.dl').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/plain'}));a.download=file.name.replace(/\.pdf$/i,'')+'.txt';a.click()};
+  box.querySelector('.cp').onclick=()=>navigator.clipboard.writeText(text);
+ }catch(err){box.innerHTML=`<h3>${file.name}</h3><p>Could not read this PDF: ${err.message}</p>`}}
+</script></body></html>
