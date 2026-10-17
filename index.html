@@ -14,7 +14,7 @@ details textarea{width:100%;height:180px;font-family:monospace;font-size:12px;ma
 #bar{height:8px;background:#eee;border-radius:4px;margin-top:12px;overflow:hidden;display:none}#bar div{height:100%;width:0;background:#1a73e8;transition:width .2s}
 </style></head><body>
 <h1>PDF to Text</h1>
-<p class="muted">Scanned or image-only pages are read automatically with OCR (text recognition). Add PDFs or a whole folder, check the ones you want, and convert. Everything runs in your browser, so files never get uploaded anywhere.</p>
+<p class="muted">Scanned or image-only pages are read automatically with OCR (text recognition). Add PDFs or a whole folder, check the ones you want, and convert. <b>Convert selected</b> runs entirely in your browser, so files never leave your computer. <b>Download searchable PDF</b> makes a copy of each PDF with selectable, searchable text over the original page images, right in your browser. <b>Email me the results</b> does the same, then saves the searchable PDF to your Google Drive folder "PDF to Text" and emails you a download link.</p>
 <div id="drop">
   <div>Drag PDFs or folders here</div>
   <button id="bFiles">Choose files</button><button id="bFolder">Choose folder</button>
@@ -23,6 +23,8 @@ details textarea{width:100%;height:180px;font-family:monospace;font-size:12px;ma
 </div>
 <div id="controls" style="display:none;margin-top:14px">
   <button id="convert">Convert selected</button>
+  <button id="dlpdf" title="OCR each page and download a searchable PDF (stays on this computer)">Download searchable PDF</button>
+  <button id="email" title="Make a searchable PDF, save it to your Google Drive and email you a download link">Email me the results</button>
   <button id="zip" class="sec" disabled>Download all as .zip</button>
   <button id="clear" class="sec">Clear list</button>
   <label class="muted" style="margin-left:6px"><input type="checkbox" id="forceOcr"> OCR every page (slower; use if text comes out garbled)</label><br><span id="summary" class="muted"></span>
@@ -31,9 +33,16 @@ details textarea{width:100%;height:180px;font-family:monospace;font-size:12px;ma
 <table id="tbl" style="display:none"><thead><tr><th><input type="checkbox" id="all" checked title="Select all"></th><th>File</th><th>Status</th><th></th></tr></thead><tbody></tbody></table>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <script type="module">
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs";
 pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs";
+// ===== Email-me-the-results backend (Google Apps Script web app) =====
+// >>> PASTE the web app URL from Deploy > New deployment here (ends in /exec). <<<
+const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbw4mJ6BI0p3bLqikFkpAJF8XHGZz5qss2lQew_AElj9oR-8Wu-SIJmJAKvXKKh3MMo84Q/exec';
+const WEB_APP_TOKEN = 'p2t-YEBCMHFLKx0M1xiBoa_oN9pi'; // must match SHARED_TOKEN in Code.gs
+const MAX_UPLOAD_MB = 25;
+// =====================================================================
 const $=id=>document.getElementById(id), tbody=document.querySelector('#tbl tbody');
 const items=[]; // {file,path,text,status,row}
 const isPdf=f=>f.type==='application/pdf'||f.name.toLowerCase().endsWith('.pdf');
@@ -87,13 +96,63 @@ $('convert').onclick=async()=>{
     try{const {text,pages,ocrd}=await extract(it.file,m=>st.textContent=m);it.text=text;
       const empty=!text.replace(/--- Page \d+ ---/g,'').trim();
       st.className='st '+(empty?'warn':'ok');st.textContent=empty?`No text found · ${pages} p`:`Done · ${pages} p`+(ocrd?` (${ocrd} via OCR)`:'');
-      const act=it.row.querySelector('.act');act.innerHTML='<button class="sec">.txt</button>';
-      act.firstChild.onclick=()=>download(new Blob([text],{type:'text/plain'}),txtName(it.path.split('/').pop()));
+      const act=it.row.querySelector('.act');const tb=document.createElement('button');tb.className='sec';tb.textContent='.txt';act.prepend(tb);
+      tb.onclick=()=>download(new Blob([text],{type:'text/plain'}),txtName(it.path.split('/').pop()));
       it.row.querySelector('.pv').innerHTML='<details><summary class="muted">Preview</summary><textarea readonly></textarea></details>';
       it.row.querySelector('textarea').value=text;
     }catch(err){st.className='st err';st.textContent='Error: '+err.message}
     n++;bar.firstChild.style.width=(100*n/todo.length)+'%';refresh()}
   $('convert').disabled=false};
+const emailReady=/^https:\/\/script\.google\.com\/.+\/exec$/.test(WEB_APP_URL);
+if(!emailReady){$('email').disabled=true;$('email').title='Not set up yet: the Google Apps Script URL has not been added to this page.'}
+// ---- Searchable PDF: page images + invisible OCR text layer ----
+const OCR_SCALE=2; // ~144 dpi render; good OCR accuracy, moderate file size
+const spdfName=p=>p.split('/').pop().replace(/\.pdf$/i,'')+'-searchable.pdf';
+async function makeSearchable(it,onStatus){
+  if(it.spdf)return it.spdf;
+  const pdf=await pdfjsLib.getDocument({data:await it.file.arrayBuffer()}).promise;
+  const out=await PDFLib.PDFDocument.create();const w=await getWorker();let text='';
+  for(let p=1;p<=pdf.numPages;p++){onStatus(`OCR page ${p}/${pdf.numPages}…`);
+    const page=await pdf.getPage(p);const base=page.getViewport({scale:1});const vp=page.getViewport({scale:OCR_SCALE});
+    const cv=document.createElement('canvas');cv.width=Math.ceil(vp.width);cv.height=Math.ceil(vp.height);const ctx=cv.getContext('2d');
+    ctx.fillStyle='#fff';ctx.fillRect(0,0,cv.width,cv.height);
+    await page.render({canvasContext:ctx,viewport:vp}).promise;
+    const jpg=await new Promise(r=>cv.toBlob(r,'image/jpeg',0.8));cv.width=cv.height=0;page.cleanup();
+    const r=await w.recognize(jpg,{pdfTitle:it.path.split('/').pop()},{pdf:true,text:true});
+    const src=await PDFLib.PDFDocument.load(Uint8Array.from(r.data.pdf));
+    const [pg]=await out.copyPages(src,[0]);const sz=pg.getSize();
+    pg.scale(base.width/sz.width,base.height/sz.height); // restore the original page size
+    out.addPage(pg);text+=(r.data.text||'').trim()+`\n\n--- Page ${p} ---\n\n`}
+  pdf.destroy();
+  if(it.text===null)it.text=text;
+  it.spdf=await out.save();return it.spdf}
+function addLink(it,label,onclick,href){const act=it.row.querySelector('.act');
+  const a=document.createElement('a');a.textContent=label;a.style.marginLeft='6px';
+  if(href){a.href=href;a.target='_blank';a.rel='noopener'}else{a.href='#';a.onclick=e=>{e.preventDefault();onclick()}}
+  act.appendChild(a)}
+async function runSearchable(btn,afterEach){
+  const todo=items.filter(i=>i.row.querySelector('input').checked);if(!todo.length)return;
+  btn.disabled=true;const bar=$('bar');bar.style.display='block';bar.firstChild.style.width='0';let n=0;
+  for(const it of todo){const st=it.row.querySelector('.st');st.className='st muted';
+    try{const had=!!it.spdf;const bytes=await makeSearchable(it,m=>st.textContent=m);
+      if(!had)addLink(it,'PDF',()=>download(new Blob([bytes],{type:'application/pdf'}),spdfName(it.path)));
+      await afterEach(it,bytes,st)}
+    catch(err){st.className='st err';st.textContent='Failed: '+(err&&err.message||err)}
+    n++;bar.firstChild.style.width=(100*n/todo.length)+'%';refresh()}
+  btn.disabled=false}
+$('dlpdf').onclick=()=>runSearchable($('dlpdf'),async(it,bytes,st)=>{
+  download(new Blob([bytes],{type:'application/pdf'}),spdfName(it.path));
+  st.className='st ok';st.textContent=`Searchable PDF ready · ${(bytes.length/1048576).toFixed(1)} MB`});
+const toB64=bytes=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=()=>rej(r.error);r.readAsDataURL(new Blob([bytes]))});
+$('email').onclick=()=>runSearchable($('email'),async(it,bytes,st)=>{
+  if(it.sent){st.className='st ok';st.textContent='Already sent – check your email';return}
+  if(bytes.length>MAX_UPLOAD_MB*1048576)throw new Error(`searchable PDF is ${(bytes.length/1048576).toFixed(1)} MB, over the ${MAX_UPLOAD_MB} MB email limit; use Download instead`);
+  st.textContent='Uploading to Drive…';
+  const r=await fetch(WEB_APP_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body:JSON.stringify({token:WEB_APP_TOKEN,filename:spdfName(it.path),mimeType:'application/pdf',data:await toB64(bytes)})});
+  const j=await r.json();if(!j.ok)throw new Error(j.error||'upload failed');
+  it.sent=true;st.className='st ok';st.textContent='Sent – check your email';
+  if(j.fileUrl)addLink(it,'Drive',null,j.fileUrl)});
 $('zip').onclick=async()=>{const zip=new JSZip();
   for(const it of items)if(it.text!==null)zip.file(txtName(it.path),it.text);
   download(await zip.generateAsync({type:'blob'}),'pdf-text.zip')};
