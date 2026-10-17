@@ -14,7 +14,7 @@ details textarea{width:100%;height:180px;font-family:monospace;font-size:12px;ma
 #bar{height:8px;background:#eee;border-radius:4px;margin-top:12px;overflow:hidden;display:none}#bar div{height:100%;width:0;background:#1a73e8;transition:width .2s}
 </style></head><body>
 <h1>PDF to Text</h1>
-<p class="muted">Add PDFs or a whole folder, check the ones you want, and convert. Everything runs in your browser, so files never get uploaded anywhere.</p>
+<p class="muted">Scanned or image-only pages are read automatically with OCR (text recognition). Add PDFs or a whole folder, check the ones you want, and convert. Everything runs in your browser, so files never get uploaded anywhere.</p>
 <div id="drop">
   <div>Drag PDFs or folders here</div>
   <button id="bFiles">Choose files</button><button id="bFolder">Choose folder</button>
@@ -25,11 +25,12 @@ details textarea{width:100%;height:180px;font-family:monospace;font-size:12px;ma
   <button id="convert">Convert selected</button>
   <button id="zip" class="sec" disabled>Download all as .zip</button>
   <button id="clear" class="sec">Clear list</button>
-  <span id="summary" class="muted"></span>
+  <label class="muted" style="margin-left:6px"><input type="checkbox" id="forceOcr"> OCR every page (slower; use if text comes out garbled)</label><br><span id="summary" class="muted"></span>
   <div id="bar"><div></div></div>
 </div>
 <table id="tbl" style="display:none"><thead><tr><th><input type="checkbox" id="all" checked title="Select all"></th><th>File</th><th>Status</th><th></th></tr></thead><tbody></tbody></table>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script type="module">
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs";
 pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs";
@@ -65,20 +66,27 @@ function refresh(){const n=items.length;$('controls').style.display=$('tbl').sty
 tbody.addEventListener('change',refresh);
 $('all').onchange=e=>{items.forEach(i=>i.row.querySelector('input').checked=e.target.checked);refresh()};
 $('clear').onclick=()=>{items.length=0;tbody.innerHTML='';refresh()};
-async function extract(file){const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;let text='';
-  for(let p=1;p<=pdf.numPages;p++){const c=await (await pdf.getPage(p)).getTextContent();let line='',lastY=null;
-    for(const it of c.items){const y=it.transform[5];if(lastY!==null&&Math.abs(y-lastY)>2){text+=line.trimEnd()+'\n';line=''}line+=it.str+(it.hasEOL?'\n':'');lastY=y}
-    text+=line.trimEnd()+`\n\n--- Page ${p} ---\n\n`}
-  return {text,pages:pdf.numPages}}
+let ocrWorker=null;
+async function getWorker(){if(!ocrWorker)ocrWorker=await Tesseract.createWorker('eng');return ocrWorker}
+async function ocrPage(page){const vp=page.getViewport({scale:2.2});const cv=document.createElement('canvas');cv.width=vp.width;cv.height=vp.height;
+  await page.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;const w=await getWorker();const r=await w.recognize(cv);cv.width=cv.height=0;return r.data.text.trim()}
+async function extract(file,onStatus){const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;let text='',ocrd=0;const force=$('forceOcr').checked;
+  for(let p=1;p<=pdf.numPages;p++){const page=await pdf.getPage(p);const c=await page.getTextContent();let pt='',line='',lastY=null;
+    for(const it of c.items){const y=it.transform[5];if(lastY!==null&&Math.abs(y-lastY)>2){pt+=line.trimEnd()+'\n';line=''}line+=it.str+(it.hasEOL?'\n':'');lastY=y}
+    pt+=line.trimEnd();
+    if(force||pt.replace(/\s/g,'').length<25){onStatus(`OCR page ${p}/${pdf.numPages}…`);pt=await ocrPage(page);ocrd++}
+    else onStatus(`Reading page ${p}/${pdf.numPages}…`);
+    text+=pt+`\n\n--- Page ${p} ---\n\n`}
+  return {text,pages:pdf.numPages,ocrd}}
 const txtName=p=>p.replace(/\.pdf$/i,'')+'.txt';
 function download(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}
 $('convert').onclick=async()=>{
   const todo=items.filter(i=>i.row.querySelector('input').checked&&i.text===null);if(!todo.length)return;
   $('convert').disabled=true;const bar=$('bar');bar.style.display='block';let n=0;
   for(const it of todo){const st=it.row.querySelector('.st');st.className='st muted';st.textContent='Converting…';
-    try{const {text,pages}=await extract(it.file);it.text=text;
+    try{const {text,pages,ocrd}=await extract(it.file,m=>st.textContent=m);it.text=text;
       const empty=!text.replace(/--- Page \d+ ---/g,'').trim();
-      st.className='st '+(empty?'warn':'ok');st.textContent=empty?`No text (scan?) · ${pages} p`:`Done · ${pages} p`;
+      st.className='st '+(empty?'warn':'ok');st.textContent=empty?`No text found · ${pages} p`:`Done · ${pages} p`+(ocrd?` (${ocrd} via OCR)`:'');
       const act=it.row.querySelector('.act');act.innerHTML='<button class="sec">.txt</button>';
       act.firstChild.onclick=()=>download(new Blob([text],{type:'text/plain'}),txtName(it.path.split('/').pop()));
       it.row.querySelector('.pv').innerHTML='<details><summary class="muted">Preview</summary><textarea readonly></textarea></details>';
