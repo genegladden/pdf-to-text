@@ -2,34 +2,91 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PDF to Text</title>
 <style>
-body{font-family:system-ui,sans-serif;max-width:820px;margin:40px auto;padding:0 16px;color:#222}
-h1{font-size:1.6em}#drop{border:2px dashed #888;border-radius:10px;padding:40px;text-align:center;cursor:pointer;background:#fafafa}
-#drop.over{background:#e8f0fe;border-color:#1a73e8}.file{border:1px solid #ddd;border-radius:8px;padding:12px;margin:14px 0}
-.file h3{margin:0 0 8px;font-size:1em}textarea{width:100%;height:200px;font-family:monospace;font-size:12px}
-button{background:#1a73e8;color:#fff;border:0;border-radius:6px;padding:8px 14px;margin:6px 6px 0 0;cursor:pointer}.muted{color:#666;font-size:.9em}
+body{font-family:system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 16px;color:#222}
+h1{font-size:1.6em}.muted{color:#666;font-size:.9em}
+#drop{border:2px dashed #888;border-radius:10px;padding:34px;text-align:center;background:#fafafa}
+#drop.over{background:#e8f0fe;border-color:#1a73e8}
+button{background:#1a73e8;color:#fff;border:0;border-radius:6px;padding:8px 14px;margin:6px 6px 0 0;cursor:pointer;font-size:.95em}
+button.sec{background:#e8eaed;color:#222}button:disabled{opacity:.45;cursor:default}
+table{width:100%;border-collapse:collapse;margin-top:16px}td,th{padding:7px 6px;border-bottom:1px solid #eee;text-align:left;font-size:.92em;vertical-align:top}
+th{background:#f5f5f5}.st{white-space:nowrap}.ok{color:#188038}.warn{color:#b06000}.err{color:#c5221f}
+details textarea{width:100%;height:180px;font-family:monospace;font-size:12px;margin-top:6px}
+#bar{height:8px;background:#eee;border-radius:4px;margin-top:12px;overflow:hidden;display:none}#bar div{height:100%;width:0;background:#1a73e8;transition:width .2s}
 </style></head><body>
 <h1>PDF to Text</h1>
-<p class="muted">Drop one or more PDFs below. Everything runs in your browser, so files never get uploaded anywhere.</p>
-<div id="drop">Drag PDFs here or click to choose<input id="pick" type="file" accept="application/pdf" multiple hidden></div>
-<div id="out"></div>
+<p class="muted">Add PDFs or a whole folder, check the ones you want, and convert. Everything runs in your browser, so files never get uploaded anywhere.</p>
+<div id="drop">
+  <div>Drag PDFs or folders here</div>
+  <button id="bFiles">Choose files</button><button id="bFolder">Choose folder</button>
+  <input id="pickFiles" type="file" accept="application/pdf,.pdf" multiple hidden>
+  <input id="pickFolder" type="file" webkitdirectory directory multiple hidden>
+</div>
+<div id="controls" style="display:none;margin-top:14px">
+  <button id="convert">Convert selected</button>
+  <button id="zip" class="sec" disabled>Download all as .zip</button>
+  <button id="clear" class="sec">Clear list</button>
+  <span id="summary" class="muted"></span>
+  <div id="bar"><div></div></div>
+</div>
+<table id="tbl" style="display:none"><thead><tr><th><input type="checkbox" id="all" checked title="Select all"></th><th>File</th><th>Status</th><th></th></tr></thead><tbody></tbody></table>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script type="module">
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs";
 pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs";
-const drop=document.getElementById('drop'),pick=document.getElementById('pick'),out=document.getElementById('out');
-drop.onclick=()=>pick.click();pick.onchange=e=>handle(e.target.files);
+const $=id=>document.getElementById(id), tbody=document.querySelector('#tbl tbody');
+const items=[]; // {file,path,text,status,row}
+const isPdf=f=>f.type==='application/pdf'||f.name.toLowerCase().endsWith('.pdf');
+$('bFiles').onclick=()=>$('pickFiles').click(); $('bFolder').onclick=()=>$('pickFolder').click();
+$('pickFiles').onchange=e=>{add([...e.target.files]);e.target.value=''};
+$('pickFolder').onchange=e=>{add([...e.target.files]);e.target.value=''};
+const drop=$('drop');
 drop.ondragover=e=>{e.preventDefault();drop.classList.add('over')};drop.ondragleave=()=>drop.classList.remove('over');
-drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');handle(e.dataTransfer.files)};
-async function handle(files){for(const f of files){if(f.type!=='application/pdf'&&!f.name.toLowerCase().endsWith('.pdf'))continue;await convert(f)}}
-async function convert(file){
- const box=document.createElement('div');box.className='file';box.innerHTML=`<h3>${file.name}</h3><div class="muted">Converting…</div>`;out.prepend(box);
- try{const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;let text='';
+drop.ondrop=async e=>{e.preventDefault();drop.classList.remove('over');
+  const entries=[...e.dataTransfer.items].map(i=>i.webkitGetAsEntry&&i.webkitGetAsEntry()).filter(Boolean);
+  if(!entries.length){add([...e.dataTransfer.files]);return}
+  const out=[];for(const en of entries)await walk(en,'',out);add(out)};
+function walk(entry,prefix,out){return new Promise(res=>{
+  if(entry.isFile){entry.file(f=>{try{Object.defineProperty(f,'_path',{value:prefix+f.name})}catch{}out.push(f);res()},()=>res())}
+  else if(entry.isDirectory){const r=entry.createReader(),all=[];
+    const read=()=>r.readEntries(async ents=>{if(!ents.length){for(const c of all)await walk(c,prefix+entry.name+'/',out);res()}else{all.push(...ents);read()}},()=>res());read()}
+  else res()})}
+function add(files){
+  for(const f of files){if(!isPdf(f))continue;const path=f._path||f.webkitRelativePath||f.name;
+    if(items.some(i=>i.path===path&&i.file.size===f.size))continue;
+    const it={file:f,path,text:null,status:'Waiting'};items.push(it);
+    const tr=document.createElement('tr');tr.innerHTML=`<td><input type="checkbox" checked></td><td>${esc(path)}<div class="pv"></div></td><td class="st muted">Waiting</td><td class="act"></td>`;
+    it.row=tr;tbody.appendChild(tr)}
+  refresh()}
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function refresh(){const n=items.length;$('controls').style.display=$('tbl').style.display=n?'':'none';
+  const done=items.filter(i=>i.text!==null).length;$('zip').disabled=!done;
+  const sel=items.filter(i=>i.row.querySelector('input').checked).length;
+  $('summary').textContent=`${n} PDF${n==1?'':'s'}, ${sel} selected, ${done} converted`}
+tbody.addEventListener('change',refresh);
+$('all').onchange=e=>{items.forEach(i=>i.row.querySelector('input').checked=e.target.checked);refresh()};
+$('clear').onclick=()=>{items.length=0;tbody.innerHTML='';refresh()};
+async function extract(file){const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;let text='';
   for(let p=1;p<=pdf.numPages;p++){const c=await (await pdf.getPage(p)).getTextContent();let line='',lastY=null;
-   for(const it of c.items){const y=it.transform[5];if(lastY!==null&&Math.abs(y-lastY)>2){text+=line.trimEnd()+'\n';line=''}line+=it.str+(it.hasEOL?'\n':'');lastY=y}
-   text+=line.trimEnd()+`\n\n--- Page ${p} ---\n\n`}
-  const empty=!text.replace(/--- Page \d+ ---/g,'').trim();
-  box.innerHTML=`<h3>${file.name} (${pdf.numPages} pages)</h3>${empty?'<p class="muted">No text found. This PDF is probably a scan or photo, which needs OCR.</p>':''}<textarea></textarea><br><button class="dl">Download .txt</button><button class="cp">Copy</button>`;
-  box.querySelector('textarea').value=text;
-  box.querySelector('.dl').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/plain'}));a.download=file.name.replace(/\.pdf$/i,'')+'.txt';a.click()};
-  box.querySelector('.cp').onclick=()=>navigator.clipboard.writeText(text);
- }catch(err){box.innerHTML=`<h3>${file.name}</h3><p>Could not read this PDF: ${err.message}</p>`}}
+    for(const it of c.items){const y=it.transform[5];if(lastY!==null&&Math.abs(y-lastY)>2){text+=line.trimEnd()+'\n';line=''}line+=it.str+(it.hasEOL?'\n':'');lastY=y}
+    text+=line.trimEnd()+`\n\n--- Page ${p} ---\n\n`}
+  return {text,pages:pdf.numPages}}
+const txtName=p=>p.replace(/\.pdf$/i,'')+'.txt';
+function download(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}
+$('convert').onclick=async()=>{
+  const todo=items.filter(i=>i.row.querySelector('input').checked&&i.text===null);if(!todo.length)return;
+  $('convert').disabled=true;const bar=$('bar');bar.style.display='block';let n=0;
+  for(const it of todo){const st=it.row.querySelector('.st');st.className='st muted';st.textContent='Converting…';
+    try{const {text,pages}=await extract(it.file);it.text=text;
+      const empty=!text.replace(/--- Page \d+ ---/g,'').trim();
+      st.className='st '+(empty?'warn':'ok');st.textContent=empty?`No text (scan?) · ${pages} p`:`Done · ${pages} p`;
+      const act=it.row.querySelector('.act');act.innerHTML='<button class="sec">.txt</button>';
+      act.firstChild.onclick=()=>download(new Blob([text],{type:'text/plain'}),txtName(it.path.split('/').pop()));
+      it.row.querySelector('.pv').innerHTML='<details><summary class="muted">Preview</summary><textarea readonly></textarea></details>';
+      it.row.querySelector('textarea').value=text;
+    }catch(err){st.className='st err';st.textContent='Error: '+err.message}
+    n++;bar.firstChild.style.width=(100*n/todo.length)+'%';refresh()}
+  $('convert').disabled=false};
+$('zip').onclick=async()=>{const zip=new JSZip();
+  for(const it of items)if(it.text!==null)zip.file(txtName(it.path),it.text);
+  download(await zip.generateAsync({type:'blob'}),'pdf-text.zip')};
 </script></body></html>
